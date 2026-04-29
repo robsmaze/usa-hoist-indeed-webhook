@@ -1,11 +1,17 @@
-# USA Hoist — Indeed Application Data Webhook (Vercel)
+# USA Hoist — Indeed Webhook + Shared Hiring Tracker (Vercel)
 
-Tiny serverless project that receives Indeed applications via webhook, parks them in Vercel Blob, and exposes a pull endpoint the Mac-side script reads from to feed the Cowork hiring digest.
+Two things in one Vercel project:
+
+1. **Indeed Application Data webhook receiver** — Indeed POSTs applications here, we park them in Vercel Blob, and the Mac-side puller fetches them daily.
+2. **Shared candidate review tool** — `candidates.html` is a small web app served from `public/` that lets you and your two co-hiring-managers see the same candidates, mark statuses, and leave notes. State is stored in Vercel KV via `/api/candidate-state`.
 
 ## What's inside
 
-- `api/indeed-webhook.js` — `POST /api/indeed-webhook`. Receives the Indeed Application Data payload (validated against `INDEED_WEBHOOK_SECRET`), writes the raw JSON to Vercel Blob at `indeed/{YYYY-MM-DD}/{jobId}/{applicationId}.json`.
+- `api/indeed-webhook.js` — `POST /api/indeed-webhook`. Receives Indeed application data (validated against `INDEED_WEBHOOK_SECRET`), writes raw JSON to Vercel Blob at `indeed/{YYYY-MM-DD}/{jobId}/{applicationId}.json`.
 - `api/applications.js` — `GET /api/applications?since=YYYY-MM-DD`. Authed by `PULL_API_KEY` header. Lists every blob received that day for the Mac puller.
+- `api/candidate-state.js` — `GET` and `PUT /api/candidate-state`. Authed by `HIRING_API_TOKEN` header. KV-backed shared status + notes for each candidate, stamped with editor + timestamp.
+- `public/candidates.html` — the shared review tool (regenerated daily by the Mac script `regenerate_candidates_html.py`).
+- `public/resumes/` — resume PDFs (also regenerated daily).
 - `package.json`, `vercel.json`, `.env.example`, `.gitignore`.
 
 ## One-time deploy
@@ -46,6 +52,54 @@ Tiny serverless project that receives Indeed applications via webhook, parks the
      -H "X-Pull-Api-Key: <YOUR_PULL_API_KEY>"
    ```
    Expect: a JSON envelope with the smoke-test application listed.
+
+## Tier 2 setup (after the basic webhook is live)
+
+Adds the shared candidate-tracker UI on top of the webhook receiver.
+
+### 1. Add Vercel KV
+
+In the Vercel dashboard for this project:
+- **Storage** → **Create Database** → **KV**
+- Name it `hiring-state` and connect to this project
+- Vercel auto-injects `KV_REST_API_URL` + `KV_REST_API_TOKEN` env vars
+
+### 2. Set the hiring-API token
+
+```bash
+# from your terminal in the repo
+openssl rand -hex 32   # generate a third secret
+```
+
+In the Vercel dashboard → Project Settings → Environment Variables:
+- Add `HIRING_API_TOKEN` = the value above (Production environment)
+
+### 3. Enable Deployment Protection
+
+Project Settings → **Deployment Protection** → **Standard Protection** (or **Password Protection**). Pick a password you'll share with the two other hiring managers. Without this, anyone with the URL could browse resumes — don't skip it.
+
+### 4. Redeploy
+
+Project → Deployments → top deployment → `…` → **Redeploy** so KV bindings + the new env var are picked up.
+
+### 5. First daily refresh
+
+On your Mac, run the regenerator (which lives in the local helper bundle):
+
+```bash
+~/usa-hoist-hiring/regenerate_candidates_html.py
+```
+
+It reads today's pulled data + your manual records, writes `public/candidates.html` and copies PDFs into `public/resumes/`, commits, and pushes. Vercel auto-deploys.
+
+### 6. Share with the other hiring managers
+
+Send each of them:
+- The URL: `https://usa-hoist-indeed-webhook-n1ak.vercel.app/candidates.html`
+- The Vercel deployment-protection password (so they can get past the auth wall)
+- The `HIRING_API_TOKEN` value (they paste it once on first load — stored in their browser only)
+
+On first visit they'll see a setup modal asking for their name and the API token. After that, the app loads and every status/notes change syncs through the API to KV. Each edit shows "Last edited by X at HH:MM" so you all see who screened whom.
 
 ## Indeed-side configuration
 

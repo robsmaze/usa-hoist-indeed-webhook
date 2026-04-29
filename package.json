@@ -1,13 +1,14 @@
 {
   "name": "usa-hoist-indeed-webhook",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Indeed Application Data webhook receiver for USA Hoist Company. Receives applications via Indeed's Job Sync / Apply integration, stores them in Vercel Blob, and exposes a pull API consumed by the local Mac script that feeds the Cowork hiring digest.",
+  "description": "Indeed Application Data webhook receiver + shared candidate-state API for USA Hoist Company. Receives applications via Indeed's Job Sync / Apply integration, stores them in Vercel Blob, exposes a pull API consumed by the local Mac script that feeds the Cowork hiring digest, and serves a shared candidate review tool (candidates.html) backed by Vercel KV.",
   "engines": {
     "node": "20.x"
   },
   "dependencies": {
-    "@vercel/blob": "^0.27.0"
+    "@vercel/blob": "^0.27.0",
+    "@vercel/kv": "^3.0.0"
   }
 }
