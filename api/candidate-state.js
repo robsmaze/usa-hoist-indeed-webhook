@@ -59,11 +59,7 @@ export default async function handler(req, res) {
   }
 
   if (!process.env.HIRING_API_TOKEN) {
-    return res.status(500).json({
-      error: 'HIRING_API_TOKEN not configured on the server',
-      total_env_keys: Object.keys(process.env).length,
-      all_env_keys: Object.keys(process.env).sort(),
-    });
+    return res.status(500).json({ error: 'HIRING_API_TOKEN not configured on the server' });
   }
   if (!authOk(req)) {
     return res.status(401).json({ error: 'unauthorized — missing or wrong X-Hiring-Token' });
