@@ -1,0 +1,7 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/indeed-webhook.js": { "maxDuration": 60 },
+    "api/applications.js":   { "maxDuration": 30 }
+  }
+}
