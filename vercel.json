@@ -1,7 +1,14 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "api/indeed-webhook.js": { "maxDuration": 60 },
-    "api/applications.js":   { "maxDuration": 30 }
-  }
+    "api/indeed-webhook.js":      { "maxDuration": 60 },
+    "api/applications.js":        { "maxDuration": 30 },
+    "api/cron-refresh-roster.js": { "maxDuration": 300 }
+  },
+  "crons": [
+    {
+      "path": "/api/cron-refresh-roster",
+      "schedule": "55 14 * * *"
+    }
+  ]
 }
