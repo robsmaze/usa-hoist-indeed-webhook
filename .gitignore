@@ -1,0 +1,24 @@
+# Vercel CLI link state — different per machine, not for source control.
+.vercel/
+
+# Environment files — secrets. Never commit.
+.env
+.env.*
+!.env.example
+
+# macOS clutter.
+.DS_Store
+
+# Editor / OS noise.
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Node (if anyone npm-installs locally).
+node_modules/
+
+# Claude Code per-user settings — shared settings.json IS committed; settings.local.json is not.
+.claude/settings.local.json
+.vercel
+.env*.local
