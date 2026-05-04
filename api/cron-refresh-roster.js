@@ -282,6 +282,12 @@ function mergeManual(records, manual) {
         contact_email: m.contact_email || '',
         contact_phone: m.contact_phone || '',
         why: m.why || '',
+        // Pass through optional pointers used by the dashboard's
+        // "Open in Outlook" / "Open on Indeed" buttons. Empty strings are
+        // fine — the dashboard renders the button only when set.
+        outlook_email_uri:    m.outlook_email_uri    || m.indeed_email_uri || '',
+        indeed_application_url: m.indeed_application_url || '',
+        indeed_batch_others:  m.indeed_batch_others  || 0,
       });
     }
   }
