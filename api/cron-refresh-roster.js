@@ -288,6 +288,12 @@ function mergeManual(records, manual) {
         outlook_email_uri:    m.outlook_email_uri    || m.indeed_email_uri || '',
         indeed_application_url: m.indeed_application_url || '',
         indeed_batch_others:  m.indeed_batch_others  || 0,
+        // Indeed Employer's own per-candidate rating (sentiment): YES (Shortlist),
+        // MAYBE (Undecided), NO (Reject), or UNSET (untouched). Surfaced as a
+        // separate column in the dashboard so we can see Robby's Indeed-side
+        // grading at a glance independent of our own A/B/C/RB/R/Q.
+        indeed_sentiment: m.indeed_sentiment || '',
+        indeed_legacy_id: m.indeed_legacy_id || '',
       });
     }
   }
