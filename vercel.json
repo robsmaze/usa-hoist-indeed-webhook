@@ -10,5 +10,8 @@
       "path": "/api/cron-refresh-roster",
       "schedule": "55 14 * * *"
     }
+  ],
+  "redirects": [
+    { "source": "/", "destination": "/candidates.html", "permanent": false }
   ]
 }
