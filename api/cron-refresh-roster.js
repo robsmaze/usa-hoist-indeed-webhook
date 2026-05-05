@@ -21,6 +21,7 @@
 //   CRON_SECRET (auto-injected by Vercel when a cron is configured)
 
 import { list, put } from '@vercel/blob';
+import { kv } from '@vercel/kv';
 
 export const config = {
   runtime: 'nodejs',
@@ -28,18 +29,12 @@ export const config = {
   maxDuration: 300,
 };
 
-// ---------------------------------------------------------------------------
-// Configuration — keep in sync with `~/usa-hoist-hiring/config.json`.
-// LinkedIn job IDs come from LinkupAPI's job_id field; Indeed job IDs are
-// the legacy ID Indeed sends in the webhook payload.
-// ---------------------------------------------------------------------------
-
-const ROLES = {
-  'ops-manager':    { label: 'Operations Manager', linkedin_job_id: '4405169091', indeed_job_id: '16af8944d47e' },
-  'revit-engineer': { label: 'Revit Engineer',     linkedin_job_id: '4405148912', indeed_job_id: null },
-  'ar-specialist':  { label: 'AR Specialist',      linkedin_job_id: null,         indeed_job_id: '32dcf86ada5a' },
-};
-
+// Job config used to live as a hardcoded ROLES const here. As of Phase 3 it
+// lives in KV (managed via /api/jobs and the "Manage Jobs" dashboard modal).
+// Adding a new hire is now: paste IDs into the Manage Jobs UI → next cron
+// run picks them up. Format per record: { role_slug, role_label, status,
+// indeed_legacy_id, linkedin_job_id, rubric, created_at, closed_at }.
+const JOBS_PREFIX = 'hiring:job:';
 const INDEED_LOOKBACK_DAYS = 30;
 const LINKUPAPI_URL = 'https://api.linkupapi.com/v2/recruiter';
 const LINKUPAPI_PAGE_SIZE = 100;
@@ -151,6 +146,34 @@ async function readIndeedBlobs(lookbackDays) {
 // ---------------------------------------------------------------------------
 // Manual records reader — pulls from `hiring/manual-records.json` Blob.
 // ---------------------------------------------------------------------------
+
+// Pull the active job set from KV. Returns the same shape the old ROLES const
+// did so the rest of this file barely changes: { 'role-slug': { label, linkedin_job_id, indeed_legacy_id, ... } }.
+// Includes 'paused' status — paused jobs still pull data so the dashboard can
+// display them, just no new outreach. 'closed' jobs are excluded.
+async function readActiveJobs() {
+  let cursor = 0;
+  const keys = [];
+  do {
+    const [next, batch] = await kv.scan(cursor, { match: JOBS_PREFIX + '*', count: 200 });
+    keys.push(...batch);
+    cursor = Number(next) || 0;
+  } while (cursor !== 0);
+  if (keys.length === 0) return {};
+  const values = await kv.mget(...keys);
+  const out = {};
+  for (const j of values) {
+    if (!j || !j.role_slug) continue;
+    if (j.status === 'closed') continue;
+    out[j.role_slug] = {
+      label: j.role_label,
+      linkedin_job_id: j.linkedin_job_id || null,
+      indeed_job_id: j.indeed_legacy_id || null,
+      status: j.status,
+    };
+  }
+  return out;
+}
 
 async function readManualRecords() {
   const page = await list({ prefix: 'hiring/manual-records', limit: 50 });
@@ -341,6 +364,11 @@ export default async function handler(req, res) {
     manual:   { count: 0 },
   };
 
+  // 0. Load active jobs from KV. If empty (fresh deploy, no UI use yet), the
+  // /api/jobs GET handler seeds defaults — the cron will pick them up next
+  // run. We don't auto-seed here to keep cron logic side-effect-free.
+  const ROLES = await readActiveJobs();
+
   // 1. LinkedIn — sequential per role; LinkupAPI is slow and we don't want to
   // double our rate-limit footprint by parallelizing.
   const liRecords = [];
@@ -395,10 +423,36 @@ export default async function handler(req, res) {
   // 4. Merge manual overrides + add standalone manual entries.
   const merged = mergeManual([...liRecords, ...indRecords], manual);
 
+  // 4b. Per-job stats for the dashboard's stats strip. Counts by sentiment
+  // and grade per role; the dashboard renders one row per active job.
+  const perJob = {};
+  for (const [slug, role] of Object.entries(ROLES)) {
+    perJob[slug] = {
+      role_slug: slug,
+      role_label: role.label,
+      status: role.status,
+      candidates: 0,
+      by_sentiment: { YES: 0, MAYBE: 0, NO: 0, UNSET: 0 },
+      by_grade: { A: 0, B: 0, C: 0, RB: 0, R: 0, Q: 0 },
+      with_pdf: 0,
+    };
+  }
+  for (const c of merged) {
+    const j = perJob[c.role_slug];
+    if (!j) continue;
+    j.candidates += 1;
+    const s = c.indeed_sentiment || 'UNSET';
+    if (j.by_sentiment[s] !== undefined) j.by_sentiment[s] += 1;
+    const g = c.grade || 'Q';
+    if (j.by_grade[g] !== undefined) j.by_grade[g] += 1;
+    if (c.cv_path) j.with_pdf += 1;
+  }
+
   // 5. Write the unified roster snapshot to Blob — same path /api/candidates reads.
   const today = isoDate(new Date());
   const payload = {
     candidates: merged,
+    per_job: Object.values(perJob),
     api_base_url: '',
     generated_at: new Date().toISOString(),
     data_window: today,

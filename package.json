@@ -8,6 +8,7 @@
     "node": "20.x"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.93.0",
     "@vercel/blob": "^2.3.3",
     "@vercel/kv": "^3.0.0"
   }

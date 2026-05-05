@@ -18,6 +18,11 @@
 # Node (if anyone npm-installs locally).
 node_modules/
 
+# Resume PDFs from the legacy Mac-side regenerator's copy_resumes step.
+# Phase 2c+ cv_paths now point to Blob URLs; this directory is no longer
+# the source of truth and shouldn't accumulate per-deploy noise.
+public/resumes/
+
 # Claude Code per-user settings — shared settings.json IS committed; settings.local.json is not.
 .claude/settings.local.json
 .vercel
