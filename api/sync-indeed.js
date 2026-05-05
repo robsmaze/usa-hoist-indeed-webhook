@@ -44,6 +44,13 @@ const FIND_RCP_MATCHES_BODY = JSON.stringify({
       defaultStrategyId: 'U20GF',
       limit: 100,
       context: {
+        // DISPOSITION values match Indeed's UI default — exclude REJECTED
+        // (and ARCHIVED/HIRED) so a candidate Robby has explicitly removed
+        // from his pipeline doesn't keep reappearing on every sync.
+        // LinkupAPI's LinkedIn pull does the same by default, so the two
+        // sources behave consistently. If we ever need a "show rejected"
+        // view, that's a UI toggle that adds these dispositions back —
+        // not a default behavior.
         surfaceContext: [
           { contextKey: 'HOSTED_JOB_POST_STATUS', contextPayload: 'ACTIVE' },
           { contextKey: 'HOSTED_JOB_POST_STATUS', contextPayload: 'PAUSED' },
