@@ -31,7 +31,7 @@ export const config = {
 
 const KEY_PREFIX = 'hiring:state:';
 const VALID_STATUSES = new Set([
-  'new', 'phone-screen', 'interview', 'offer', 'hired', 'pass', 'hold'
+  'new', 'maybe', 'phone-screen', 'interview', 'offer', 'hired', 'pass', 'hold'
 ]);
 
 function authOk(req) {
