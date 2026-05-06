@@ -50,17 +50,37 @@ function safeSlug(s) {
   return String(s).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 80) || 'x';
 }
 
-function inferExt(contentType, filename) {
-  if (filename) {
-    const m = /\.([A-Za-z0-9]{2,5})$/.exec(filename);
-    if (m) return '.' + m[1].toLowerCase();
+// Authoritative file-type detection from the actual bytes. LinkupAPI's
+// content_type and filename fields are unreliable — some applicants upload
+// .docx files but the API reports application/pdf or empty filename, which
+// previously caused us to save .docx bytes under .pdf paths and serve them
+// with the wrong Content-Type. Magic-byte sniffing is bulletproof.
+//
+//   PDF  → 0x25 0x50 0x44 0x46  ("%PDF")
+//   DOCX → 0x50 0x4B 0x03 0x04  ("PK\x03\x04", any ZIP container — could
+//          also be xlsx/pptx, but for our domain it's overwhelmingly docx)
+//   DOC  → 0xD0 0xCF 0x11 0xE0  (legacy OLE compound document)
+//   RTF  → 0x7B 0x5C 0x72 0x74  ("{\\rt")
+function sniffFileType(buffer) {
+  if (!buffer || buffer.length < 4) {
+    return { ext: '.bin', contentType: 'application/octet-stream' };
   }
-  if (typeof contentType === 'string') {
-    if (/wordprocessingml/.test(contentType)) return '.docx';
-    if (/msword/.test(contentType)) return '.doc';
-    if (/pdf/.test(contentType)) return '.pdf';
+  const b0 = buffer[0], b1 = buffer[1], b2 = buffer[2], b3 = buffer[3];
+  if (b0 === 0x25 && b1 === 0x50 && b2 === 0x44 && b3 === 0x46) {
+    return { ext: '.pdf', contentType: 'application/pdf' };
   }
-  return '.pdf';
+  if (b0 === 0x50 && b1 === 0x4B && (b2 === 0x03 || b2 === 0x05) && (b3 === 0x04 || b3 === 0x06)) {
+    return { ext: '.docx', contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
+  }
+  if (b0 === 0xD0 && b1 === 0xCF && b2 === 0x11 && b3 === 0xE0) {
+    return { ext: '.doc', contentType: 'application/msword' };
+  }
+  if (b0 === 0x7B && b1 === 0x5C && b2 === 0x72 && b3 === 0x74) {
+    return { ext: '.rtf', contentType: 'application/rtf' };
+  }
+  // Unknown — fall back to whatever LinkupAPI claimed but don't pretend it's
+  // a PDF (the cache would mask the real issue).
+  return { ext: '.bin', contentType: 'application/octet-stream' };
 }
 
 async function findCachedCV(source, applicationId) {
@@ -71,7 +91,37 @@ async function findCachedCV(source, applicationId) {
     const remainder = b.pathname.slice(prefix.length);
     return remainder.startsWith('.') && !remainder.includes('/');
   });
-  return blobs[0] || null;
+  if (blobs.length === 0) return null;
+  // Validate each candidate blob in turn — return the first whose extension
+  // matches its actual magic bytes. Older cache writes used LinkupAPI's
+  // (sometimes wrong) content_type, so a .pdf entry might wrap docx bytes;
+  // we want to skip those and let the handler refetch + rewrite at the
+  // correct path.
+  for (const b of blobs) {
+    const v = await validateCachedBlob(b);
+    if (v) return { blob: b, ...v };
+  }
+  return null;
+}
+
+// Verify that a cached blob's extension matches its actual bytes. Earlier
+// cache writes used LinkupAPI's content_type without sanity-checking,
+// which let .docx bytes land under .pdf names. This validator does a
+// 4-byte Range request against the public blob URL and re-asserts the
+// extension. Returns null when the cache entry is bad — callers should
+// then refetch from upstream.
+async function validateCachedBlob(blob) {
+  try {
+    const r = await fetch(blob.url, { headers: { Range: 'bytes=0-7' } });
+    if (!r.ok && r.status !== 206) return null;
+    const ab = await r.arrayBuffer();
+    const sniff = sniffFileType(Buffer.from(ab));
+    const expected = (blob.pathname.match(/\.[A-Za-z0-9]+$/) || [''])[0].toLowerCase();
+    if (sniff.ext === expected) return { ext: sniff.ext, contentType: sniff.contentType };
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,18 +235,23 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'indeed_blob_pathname is required when source=indeed' });
   }
 
-  // 1. Cache hit?
+  // 1. Cache hit? findCachedCV() validates extensions against magic bytes;
+  // it returns null if there's no entry OR the existing entries are
+  // mislabeled. Mislabeled entries are skipped so we re-fetch + rewrite at
+  // the correct path.
   try {
-    const cached = await findCachedCV(source, applicationId);
-    if (cached) {
+    const hit = await findCachedCV(source, applicationId);
+    if (hit) {
       return res.status(200).json({
         ok: true,
         cached: true,
         source,
-        url: cached.url,
-        pathname: cached.pathname,
-        size: cached.size,
-        uploaded_at: cached.uploadedAt,
+        url: hit.blob.url,
+        pathname: hit.blob.pathname,
+        size: hit.blob.size,
+        content_type: hit.contentType,
+        ext: hit.ext,
+        uploaded_at: hit.blob.uploadedAt,
       });
     }
   } catch (e) {
@@ -219,14 +274,15 @@ export default async function handler(req, res) {
     return res.status(404).json({ error: 'CV not available', detail: result.reason });
   }
 
-  // 3. Upload to cache.
-  const ext = inferExt(result.contentType, result.filename);
-  const cachePath = `resumes/${source}/${safeSlug(applicationId)}${ext}`;
+  // 3. Upload to cache. Use magic-byte sniffing as the source of truth —
+  // LinkupAPI's content_type and filename can be wrong/empty.
+  const sniffed = sniffFileType(result.buffer);
+  const cachePath = `resumes/${source}/${safeSlug(applicationId)}${sniffed.ext}`;
   let blob;
   try {
     blob = await put(cachePath, result.buffer, {
       access: 'public',
-      contentType: result.contentType || 'application/pdf',
+      contentType: sniffed.contentType,
       addRandomSuffix: false,
       allowOverwrite: true,
     });
@@ -240,7 +296,9 @@ export default async function handler(req, res) {
     source,
     url: blob.url,
     pathname: blob.pathname,
-    content_type: result.contentType,
+    content_type: sniffed.contentType,
+    ext: sniffed.ext,
+    upstream_content_type: result.contentType || '',
     size: result.buffer.length,
   });
 }
