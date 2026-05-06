@@ -200,6 +200,14 @@ function normalizeLinkedIn(c, roleSlug, roleLabel) {
   const aid = c.application_id;
   if (!aid) return null;
   const fullName = c.full_name || `${c.first_name || ''} ${c.last_name || ''}`.trim() || 'Unknown';
+  // LinkedIn's per-applicant rating from LinkupAPI:
+  //   GOOD_FIT  → "Top Fit" (the green star in LinkedIn)
+  //   MAYBE     → "Maybe"
+  //   NOT_A_FIT → "Not a Fit"
+  //   UNRATED   → not yet rated
+  // is_top_choice is a separate boolean (LinkedIn lets you star a candidate
+  // independent of fit rating).
+  const liRating = c.rating || 'UNRATED';
   return {
     id: `${roleSlug}:${aid}`,
     role: roleLabel,
@@ -217,7 +225,25 @@ function normalizeLinkedIn(c, roleSlug, roleLabel) {
     contact_phone: '',
     why: '',
     profile_url: c.profile_url || '',
+    linkedin_rating: liRating,
+    is_top_choice: !!c.is_top_choice,
+    platform_rating: linkedinToPlatformRating(liRating, !!c.is_top_choice),
   };
+}
+
+// Map any source's native rating to the unified Yes/Maybe/No/'' bucket the
+// dashboard's "Rating" column shows.
+function linkedinToPlatformRating(rating, isTopChoice) {
+  if (isTopChoice || rating === 'GOOD_FIT') return 'YES';
+  if (rating === 'MAYBE') return 'MAYBE';
+  if (rating === 'NOT_A_FIT') return 'NO';
+  return ''; // UNRATED or anything else
+}
+
+function indeedToPlatformRating(sentiment) {
+  // Indeed Employer's sentiment values are already YES / MAYBE / NO / UNSET.
+  if (sentiment === 'YES' || sentiment === 'MAYBE' || sentiment === 'NO') return sentiment;
+  return '';
 }
 
 function normalizeIndeed(payload, roleSlug, roleLabel, blobPathname) {
@@ -312,12 +338,30 @@ function mergeManual(records, manual) {
         indeed_application_url: m.indeed_application_url || '',
         indeed_batch_others:  m.indeed_batch_others  || 0,
         // Indeed Employer's own per-candidate rating (sentiment): YES (Shortlist),
-        // MAYBE (Undecided), NO (Reject), or UNSET (untouched). Surfaced as a
-        // separate column in the dashboard so we can see Robby's Indeed-side
-        // grading at a glance independent of our own A/B/C/RB/R/Q.
+        // MAYBE (Undecided), NO (Reject), or UNSET (untouched). Surfaced via
+        // the dashboard's unified "Rating" column alongside LinkedIn's rating.
         indeed_sentiment: m.indeed_sentiment || '',
         indeed_legacy_id: m.indeed_legacy_id || '',
+        // LinkedIn rating fields (mirrored when manual record was originally
+        // sourced from LinkedIn). The cron always recomputes platform_rating
+        // below from whichever source field is present.
+        linkedin_rating: m.linkedin_rating || '',
+        is_top_choice: !!m.is_top_choice,
+        platform_rating: m.platform_rating || '',
       });
+    }
+  }
+  // Final pass: ensure every record has a derived `platform_rating` so the
+  // dashboard's unified Rating column doesn't have to know about source-
+  // specific shape. We recompute even if the field already exists, so a
+  // post-hoc sentiment update on either source flows through immediately.
+  for (const r of byId.values()) {
+    if (r.indeed_sentiment) {
+      r.platform_rating = indeedToPlatformRating(r.indeed_sentiment);
+    } else if (r.linkedin_rating || r.is_top_choice) {
+      r.platform_rating = linkedinToPlatformRating(r.linkedin_rating || '', !!r.is_top_choice);
+    } else if (!r.platform_rating) {
+      r.platform_rating = '';
     }
   }
   const gradeRank = { A: 0, B: 1, C: 2, RB: 3, R: 4, Q: 5 };
@@ -441,7 +485,11 @@ export default async function handler(req, res) {
     const j = perJob[c.role_slug];
     if (!j) continue;
     j.candidates += 1;
-    const s = c.indeed_sentiment || 'UNSET';
+    // Unified Yes/Maybe/No counts across BOTH Indeed sentiment and LinkedIn
+    // rating. platform_rating is set by mergeManual() above; '' means unrated
+    // on both platforms (we still call that bucket UNSET for back-compat with
+    // the existing dashboard stats strip).
+    const s = c.platform_rating || 'UNSET';
     if (j.by_sentiment[s] !== undefined) j.by_sentiment[s] += 1;
     const g = c.grade || 'Q';
     if (j.by_grade[g] !== undefined) j.by_grade[g] += 1;

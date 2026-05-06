@@ -1,15 +1,16 @@
 // Shared candidate-state endpoint.
 //
-// Stores per-candidate hiring decisions (status + notes) in Vercel KV so all
-// hiring managers see the same state. Each write is stamped with the editor's
-// name and a timestamp so we can show who phone-screened whom.
+// Stores per-candidate hiring decisions (status + notes + next_action) in
+// Vercel KV so all hiring managers see the same state. Each write is stamped
+// with the editor's name and a timestamp so we can show who phone-screened
+// whom.
 //
 // API:
 //   GET  /api/candidate-state
-//        → returns { state: { "<application_id>": {status, notes, editor, updated_at}, ... } }
+//        → returns { state: { "<application_id>": {status, notes, next_action, editor, updated_at}, ... } }
 //
 //   PUT  /api/candidate-state
-//        body: { application_id, status?, notes?, editor }
+//        body: { application_id, status?, notes?, next_action?, editor }
 //        → returns the updated record
 //
 // Auth: shared header X-Hiring-Token matched against HIRING_API_TOKEN env var.
@@ -110,12 +111,21 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: `status must be one of: ${[...VALID_STATUSES].join(', ')}` });
     }
 
+    // next_action is free-text (datalist suggestions on the client, but the
+    // user can type anything). Cap at 200 chars to keep KV records small.
+    let nextAction = existing => existing.next_action || '';
+    if (body.next_action !== undefined) {
+      const v = String(body.next_action || '').trim().slice(0, 200);
+      nextAction = () => v;
+    }
+
     try {
       const key = KEY_PREFIX + id;
       const existing = (await kv.get(key)) || {};
       const next = {
         status: body.status !== undefined ? body.status : (existing.status || 'new'),
         notes:  body.notes  !== undefined ? body.notes  : (existing.notes  || ''),
+        next_action: nextAction(existing),
         editor,
         updated_at: new Date().toISOString(),
       };
