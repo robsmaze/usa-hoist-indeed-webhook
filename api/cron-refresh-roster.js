@@ -101,6 +101,26 @@ async function linkupGetAllCandidates(jobId) {
   return all;
 }
 
+// Load the most recent roster snapshot (if any). Used as a fallback when
+// LinkupAPI fails — e.g., credits exhausted — so we don't wipe previously
+// pulled LinkedIn candidates from the dashboard. Returns null if no prior
+// snapshot exists.
+async function readPriorSnapshot() {
+  try {
+    const page = await list({ prefix: 'hiring/roster', limit: 50 });
+    const blobs = (page.blobs || []).sort((a, b) =>
+      new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime()
+    );
+    if (blobs.length === 0) return null;
+    const r = await fetch(blobs[0].url);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    console.warn('prior-snapshot read failed:', e?.message || e);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Indeed Blob reader — fetches raw payloads from indeed/{date}/.../*.json
 // stored by /api/indeed-webhook over the last N days.
@@ -415,6 +435,22 @@ export default async function handler(req, res) {
 
   // 1. LinkedIn — sequential per role; LinkupAPI is slow and we don't want to
   // double our rate-limit footprint by parallelizing.
+  //
+  // Failure mode protection: if LinkupAPI errors for a role (out of credits,
+  // 5xx, auth problem), preserve the prior snapshot's LinkedIn records for
+  // that role instead of silently writing 0 candidates. Without this, a
+  // single failed cron tick would wipe every LinkedIn record from the
+  // dashboard until credits get topped up and the next cron succeeds. The
+  // stale records are flagged so the UI can show a banner.
+  const priorSnapshot = await readPriorSnapshot();
+  const priorLinkedInByRole = {};
+  if (priorSnapshot?.candidates) {
+    for (const c of priorSnapshot.candidates) {
+      if (c.source !== 'LinkedIn' || !c.role_slug) continue;
+      (priorLinkedInByRole[c.role_slug] ||= []).push(c);
+    }
+  }
+
   const liRecords = [];
   for (const [slug, role] of Object.entries(ROLES)) {
     if (!role.linkedin_job_id) continue;
@@ -427,7 +463,20 @@ export default async function handler(req, res) {
         if (rec) liRecords.push(rec);
       }
     } catch (e) {
-      stats.linkedin.errors.push({ role: slug, error: e?.message || String(e) });
+      const msg = e?.message || String(e);
+      stats.linkedin.errors.push({ role: slug, error: msg });
+      // Pull-through fallback: re-use the prior snapshot's records for this
+      // role, marked as stale so the dashboard can warn. Better stale data
+      // than no data — especially for OUT_OF_CREDITS where the fix is on
+      // the user's side (refill at linkupapi.com).
+      const prior = priorLinkedInByRole[slug] || [];
+      if (prior.length > 0) {
+        for (const c of prior) {
+          liRecords.push({ ...c, stale: true, stale_reason: msg.slice(0, 120) });
+        }
+        stats.linkedin.stale_from_prior_snapshot =
+          (stats.linkedin.stale_from_prior_snapshot || 0) + prior.length;
+      }
     }
   }
 
@@ -498,12 +547,25 @@ export default async function handler(req, res) {
 
   // 5. Write the unified roster snapshot to Blob — same path /api/candidates reads.
   const today = isoDate(new Date());
+  // Detect the common LinkupAPI failure modes from the error strings we
+  // captured above. INSUFFICIENT_CREDITS is the one most likely to bite us
+  // — the API returns HTTP 402 and we need the user to top up credits on
+  // their LinkupAPI account.
+  const linkedinOutOfCredits = stats.linkedin.errors.some((e) =>
+    /INSUFFICIENT_CREDITS|HTTP 402|Not enough credits/i.test(e.error || '')
+  );
   const payload = {
     candidates: merged,
     per_job: Object.values(perJob),
     api_base_url: '',
     generated_at: new Date().toISOString(),
     data_window: today,
+    // Surfaced so the dashboard can render a banner. The roster is still
+    // usable — stale LinkedIn records are kept — but the user needs to
+    // refill credits to get fresh data on the next cron.
+    linkedin_errors: stats.linkedin.errors,
+    linkedin_out_of_credits: linkedinOutOfCredits,
+    linkedin_stale_count: stats.linkedin.stale_from_prior_snapshot || 0,
   };
   const json = JSON.stringify(payload);
   let snapshotResult;
